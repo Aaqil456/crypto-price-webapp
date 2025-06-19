@@ -4,6 +4,8 @@ import { useEffect, useState, useRef } from "react";
 // const symbols = ["BTCUSDT", "ETHUSDT"];
 const intervalOptions = ["Min1", "Min5", "Min15", "Min30", "Hour1", "Hour4","Hour8","Day1","Week1","Month1"];
 
+const API_BASE = import.meta.env.DEV ? '/api_mexc' : 'https://api.mexc.com';
+
 const App = () => {
   const [prices, setPrices] = useState({});
   const [indicators, setIndicators] = useState({});
@@ -31,7 +33,7 @@ const App = () => {
     let intervalId;
     const fetchSymbols = async () => {
       try {
-        const res = await fetch("/api_mexc/api/v3/exchangeInfo");
+        const res = await fetch(`${API_BASE}/api/v3/exchangeInfo?isSpotTradingAllowed=true`);
         const data = await res.json();
         if (data.symbols) {
           const usdtSymbols = data.symbols
@@ -40,7 +42,7 @@ const App = () => {
           setSymbols(usdtSymbols);
           // Only set default on first load
           if (firstLoad) {
-            setSelectedSymbols(usdtSymbols.slice(0, 10));
+            setSelectedSymbols(usdtSymbols.slice(0, 3));
             setFirstLoad(false);
           }
         }
@@ -56,7 +58,7 @@ const App = () => {
     const fetchKlines = async (symbol) => {
       try {
         // Get 100 klines for the current interval
-        const res = await fetch(`/api_mexc/api/v3/klines?symbol=${symbol}&interval=1m&limit=100`);
+        const res = await fetch(`${API_BASE}/api/v3/klines?symbol=${symbol}&interval=1m&limit=100`);
         const data = await res.json();
         if (Array.isArray(data)) {
           const closesArr = data.map(k => parseFloat(k[4]));
