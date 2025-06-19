@@ -31,7 +31,7 @@ const App = () => {
     let intervalId;
     const fetchSymbols = async () => {
       try {
-        const res = await fetch("/api_mexc/api/v3/exchangeInfo?isSpotTradingAllowed=true");
+        const res = await fetch("/api_mexc/api/v3/exchangeInfo");
         const data = await res.json();
         if (data.symbols) {
           const usdtSymbols = data.symbols
