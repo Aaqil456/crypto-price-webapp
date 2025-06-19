@@ -4,7 +4,8 @@ import { useEffect, useState, useRef } from "react";
 // const symbols = ["BTCUSDT", "ETHUSDT"];
 const intervalOptions = ["Min1", "Min5", "Min15", "Min30", "Hour1", "Hour4","Hour8","Day1","Week1","Month1"];
 
-const API_BASE = import.meta.env.DEV ? '/api_mexc' : 'https://api.mexc.com';
+// Use a public CORS proxy in production
+const API_BASE = import.meta.env.DEV ? '/api_mexc' : 'https://corsproxy.io/?https://api.mexc.com';
 
 const App = () => {
   const [prices, setPrices] = useState({});
