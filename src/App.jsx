@@ -1,11 +1,26 @@
 import { useEffect, useState, useRef } from "react";
+import coinSymbolsRaw from './List_of_Coin_Symbols.csv?raw';
 
 // Remove static symbols
 // const symbols = ["BTCUSDT", "ETHUSDT"];
 const intervalOptions = ["Min1", "Min5", "Min15", "Min30", "Hour1", "Hour4","Hour8","Day1","Week1","Month1"];
 
-// Use a public CORS proxy in production
-const API_BASE = import.meta.env.DEV ? '/api_mexc' : 'https://corsproxy.io/?https://api.mexc.in';
+
+// Parse CSV for coin symbols
+const parseCoinSymbols = () => {
+  // Split by lines, skip header, trim whitespace
+  return coinSymbolsRaw.split('\n').slice(1).map(line => line.trim()).filter(Boolean);
+};
+
+// Debounce hook
+function useDebouncedEffect(effect, deps, delay) {
+  const callback = useRef();
+  useEffect(() => { callback.current = effect; }, [effect]);
+  useEffect(() => {
+    const handler = setTimeout(() => callback.current(), delay);
+    return () => clearTimeout(handler);
+  }, [...deps, delay]);
+}
 
 const App = () => {
   const [prices, setPrices] = useState({});
@@ -19,60 +34,15 @@ const App = () => {
   const [macdSlow, setMacdSlow] = useState(26);
   const [macdSignal, setMacdSignal] = useState(9);
   // Dynamic coin list
-  const [symbols, setSymbols] = useState(["BTCUSDT", "ETHUSDT"]);
-  // New: state for selected coins to display
-  const [selectedSymbols, setSelectedSymbols] = useState(["BTCUSDT", "ETHUSDT"]);
+  const [symbols, setSymbols] = useState(parseCoinSymbols());
+  // Remove search from select logic, use it to filter symbols directly
   const [search, setSearch] = useState("");
-  const [firstLoad, setFirstLoad] = useState(true);
   // Pagination state
   const PAGE_SIZE = 3;
   const [page, setPage] = useState(0);
-  const pagedSymbols = selectedSymbols.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-
-  // Fetch coin list every second
-  useEffect(() => {
-    let intervalId;
-    const fetchSymbols = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/v3/exchangeInfo?isSpotTradingAllowed=true`);
-        const data = await res.json();
-        if (data.symbols) {
-          const usdtSymbols = data.symbols
-            .map((s) => s.symbol)
-            .filter((s) => s.endsWith("USDT"));
-          setSymbols(usdtSymbols);
-          // Only set default on first load
-          if (firstLoad) {
-            setSelectedSymbols(usdtSymbols.slice(0, 3));
-            setFirstLoad(false);
-          }
-        }
-      } catch (err) {}
-    };
-    fetchSymbols();
-    intervalId = setInterval(fetchSymbols, 5000);
-    return () => clearInterval(intervalId);
-  }, [firstLoad]);
-
-  // Pre-fill closes for new coins
-  useEffect(() => {
-    const fetchKlines = async (symbol) => {
-      try {
-        // Get 100 klines for the current interval
-        const res = await fetch(`${API_BASE}/api/v3/klines?symbol=${symbol}&interval=1m&limit=100`);
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          const closesArr = data.map(k => parseFloat(k[4]));
-          setCloses(prev => ({ ...prev, [symbol]: closesArr }));
-        }
-      } catch (err) {}
-    };
-    selectedSymbols.forEach(symbol => {
-      if (!closes[symbol] || closes[symbol].length < 10) {
-        fetchKlines(symbol);
-      }
-    });
-  }, [selectedSymbols]);
+  // Filter symbols by search
+  const filteredSymbols = symbols.filter(s => s.includes(search));
+  const pagedSymbols = filteredSymbols.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   // --- RSI Calculation ---
   function calculateRSI(closes, period = 14) {
@@ -114,103 +84,146 @@ const App = () => {
     return { macd: macdLine, signal: signalLine, hist };
   }
 
-  // ✅ WebSocket 1: Harga Semasa
-  useEffect(() => {
-    const wsPrice = new WebSocket("wss://wbs.mexc.com/ws");
-
-    const subscribePrice = {
-      method: "SUBSCRIPTION",
-      params: selectedSymbols.map((symbol) => `spot@public.deals.v3.api@${symbol}`),
-      id: "1",
-    };
-
-    wsPrice.onopen = () => {
-      wsPrice.send(JSON.stringify(subscribePrice));
-    };
-
-    wsPrice.onmessage = (event) => {
-      const raw = JSON.parse(event.data);
-      const topic = raw?.c;
-      const symbol = topic?.split("@").pop();
-      const price = raw?.d?.deals?.[0]?.p;
-
-      if (symbol && price) {
-        setPrices((prev) => ({
-          ...prev,
-          [symbol]: parseFloat(price).toFixed(2),
+  // --- Persistent WebSocket for Price ---
+  const wsPriceRef = useRef(null);
+  const prevPriceSymbolsRef = useRef([]);
+  useDebouncedEffect(() => {
+    if (!pagedSymbols || pagedSymbols.length === 0) return;
+    if (!wsPriceRef.current) {
+      wsPriceRef.current = new WebSocket("wss://wbs.mexc.com/ws");
+      wsPriceRef.current.onopen = () => {
+        wsPriceRef.current.send(JSON.stringify({
+          method: "SUBSCRIPTION",
+          params: pagedSymbols.map((symbol) => `spot@public.deals.v3.api@${symbol}`),
+          id: "1",
+        }));
+        prevPriceSymbolsRef.current = [...pagedSymbols];
+      };
+      wsPriceRef.current.onmessage = (event) => {
+        const raw = JSON.parse(event.data);
+        const topic = raw?.c;
+        const symbol = topic?.split("@").pop();
+        const price = raw?.d?.deals?.[0]?.p;
+        if (symbol && price) {
+          setPrices((prev) => ({
+            ...prev,
+            [symbol]: parseFloat(price).toFixed(2),
+          }));
+        }
+      };
+      wsPriceRef.current.onerror = (err) => console.error("WebSocket error:", err);
+      wsPriceRef.current.onclose = () => console.log("❌ Price WebSocket closed");
+    } else {
+      // Unsubscribe previous
+      if (prevPriceSymbolsRef.current.length > 0) {
+        wsPriceRef.current.send(JSON.stringify({
+          method: "UNSUBSCRIPTION",
+          params: prevPriceSymbolsRef.current.map((symbol) => `spot@public.deals.v3.api@${symbol}`),
+          id: "1u",
         }));
       }
-    };
-
-    return () => wsPrice.close();
-  }, [selectedSymbols]);
-
-  // ✅ WebSocket 2: K-Line Semasa (bergantung kepada interval)
-  useEffect(() => {
-    const wsKline = new WebSocket("wss://wbs.mexc.com/ws");
-
-    const subscribeKline = {
-      method: "SUBSCRIPTION",
-      params: selectedSymbols.map((symbol) => `spot@public.kline.v3.api@${symbol}@${interval}`),
-      id: "2",
-    };
-
-    wsKline.onopen = () => {
-      console.log("✅ K-line WebSocket connected");
-      wsKline.send(JSON.stringify(subscribeKline));
-    };
-
-    wsKline.onmessage = (event) => {
-      try {
-        const raw = JSON.parse(event.data);
-        const kline = raw?.d?.k;
-        const symbol = raw?.s;
-    
-        if (kline && symbol) {
-          const close = parseFloat(kline.c);
-          // Update closes
-          setCloses((prev) => {
-            const prevArr = prev[symbol] ? [...prev[symbol]] : [];
-            if (prevArr.length > 100) prevArr.shift(); // Keep max 100
-            prevArr.push(close);
-            // Calculate RSI and MACD with custom periods
-            const rsi = calculateRSI(prevArr, rsiPeriod);
-            const macd = calculateMACD(prevArr, macdFast, macdSlow, macdSignal);
-            // Update indicators
-            setIndicators((prevInd) => ({
-              ...prevInd,
-              [symbol]: {
-                ...prevInd[symbol],
-                open: parseFloat(kline.o),
-                close,
-                high: parseFloat(kline.h),
-                low: parseFloat(kline.l),
-                volume: parseFloat(kline.v),
-                amount: parseFloat(kline.a),
-                interval: kline.i,
-                start: kline.t,
-                end: kline.T,
-                rsi,
-                macd: macd.macd,
-                macdSignal: macd.signal,
-                macdHist: macd.hist,
-              },
-            }));
-            return { ...prev, [symbol]: prevArr };
-          });
-        }
-      } catch (err) {
-        console.error("❌ Failed to parse WebSocket message:", err);
+      // Subscribe new
+      wsPriceRef.current.send(JSON.stringify({
+        method: "SUBSCRIPTION",
+        params: pagedSymbols.map((symbol) => `spot@public.deals.v3.api@${symbol}`),
+        id: "1",
+      }));
+      prevPriceSymbolsRef.current = [...pagedSymbols];
+    }
+    return () => {
+      if (wsPriceRef.current) {
+        wsPriceRef.current.close();
+        wsPriceRef.current = null;
+        prevPriceSymbolsRef.current = [];
       }
     };
-    
-    
-    
-    wsKline.onerror = (err) => console.error("WebSocket error:", err);
-    wsKline.onclose = () => console.log("❌ K-line WebSocket closed");
+  }, [pagedSymbols], 500);
 
-    return () => wsKline.close();
-  }, [interval, selectedSymbols, rsiPeriod, macdFast, macdSlow, macdSignal]);
+  // --- Persistent WebSocket for K-line ---
+  const wsKlineRef = useRef(null);
+  const prevKlineSymbolsRef = useRef([]);
+  const prevIntervalRef = useRef(interval);
+  useDebouncedEffect(() => {
+    if (!pagedSymbols || pagedSymbols.length === 0) return;
+    if (!wsKlineRef.current) {
+      wsKlineRef.current = new WebSocket("wss://wbs.mexc.com/ws");
+      wsKlineRef.current.onopen = () => {
+        console.log("✅ K-line WebSocket connected");
+        wsKlineRef.current.send(JSON.stringify({
+          method: "SUBSCRIPTION",
+          params: pagedSymbols.map((symbol) => `spot@public.kline.v3.api@${symbol}@${interval}`),
+          id: "2",
+        }));
+        prevKlineSymbolsRef.current = [...pagedSymbols];
+        prevIntervalRef.current = interval;
+      };
+      wsKlineRef.current.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const kline = raw?.d?.k;
+          const symbol = raw?.s;
+          if (kline && symbol) {
+            const close = parseFloat(kline.c);
+            setCloses((prev) => {
+              const prevArr = prev[symbol] ? [...prev[symbol]] : [];
+              if (prevArr.length > 100) prevArr.shift();
+              prevArr.push(close);
+              const rsi = calculateRSI(prevArr, rsiPeriod);
+              const macd = calculateMACD(prevArr, macdFast, macdSlow, macdSignal);
+              setIndicators((prevInd) => ({
+                ...prevInd,
+                [symbol]: {
+                  ...prevInd[symbol],
+                  open: parseFloat(kline.o),
+                  close,
+                  high: parseFloat(kline.h),
+                  low: parseFloat(kline.l),
+                  volume: parseFloat(kline.v),
+                  amount: parseFloat(kline.a),
+                  interval: kline.i,
+                  start: kline.t,
+                  end: kline.T,
+                  rsi,
+                  macd: macd.macd,
+                  macdSignal: macd.signal,
+                  macdHist: macd.hist,
+                },
+              }));
+              return { ...prev, [symbol]: prevArr };
+            });
+          }
+        } catch (err) {
+          console.error("❌ Failed to parse WebSocket message:", err);
+        }
+      };
+      wsKlineRef.current.onerror = (err) => console.error("WebSocket error:", err);
+      wsKlineRef.current.onclose = () => console.log("❌ K-line WebSocket closed");
+    } else {
+      // Unsubscribe previous
+      if (prevKlineSymbolsRef.current.length > 0) {
+        wsKlineRef.current.send(JSON.stringify({
+          method: "UNSUBSCRIPTION",
+          params: prevKlineSymbolsRef.current.map((symbol) => `spot@public.kline.v3.api@${symbol}@${prevIntervalRef.current}`),
+          id: "2u",
+        }));
+      }
+      // Subscribe new
+      wsKlineRef.current.send(JSON.stringify({
+        method: "SUBSCRIPTION",
+        params: pagedSymbols.map((symbol) => `spot@public.kline.v3.api@${symbol}@${interval}`),
+        id: "2",
+      }));
+      prevKlineSymbolsRef.current = [...pagedSymbols];
+      prevIntervalRef.current = interval;
+    }
+    return () => {
+      if (wsKlineRef.current) {
+        wsKlineRef.current.close();
+        wsKlineRef.current = null;
+        prevKlineSymbolsRef.current = [];
+      }
+    };
+  }, [pagedSymbols, interval], 500);
   
 
   return (
@@ -224,38 +237,10 @@ const App = () => {
             type="text"
             placeholder="Search coin (e.g. BTCUSDT)"
             value={search}
-            onChange={e => setSearch(e.target.value.toUpperCase())}
+            onChange={e => { setSearch(e.target.value.toUpperCase()); setPage(0); }}
             className="form-control w-auto d-inline-block"
             style={{ width: 220 }}
           />
-        </div>
-        <div style={{ width: '100%' }}>
-          <select
-            multiple
-            value={selectedSymbols}
-            onChange={e => {
-              const options = Array.from(e.target.selectedOptions).map(opt => opt.value);
-              setSelectedSymbols(options);
-              setPage(0); // Reset to first page on selection change
-            }}
-            className="form-select w-auto"
-            size={6}
-            style={{ minWidth: 180, width: 220 }}
-          >
-            {symbols
-              .filter(s => s.includes(search))
-              .map(s => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-          </select>
-        </div>
-        <div>
-          <button
-            className="btn btn-secondary ms-2"
-            onClick={() => { setSelectedSymbols(symbols.slice(0, PAGE_SIZE)); setPage(0); }}
-          >
-            Reset to Top {PAGE_SIZE}
-          </button>
         </div>
       </div>
 
@@ -266,11 +251,11 @@ const App = () => {
           onClick={() => setPage((p) => Math.max(0, p - 1))}
           disabled={page === 0}
         >Prev</button>
-        <span className="text-white">Page {page + 1} of {Math.ceil(selectedSymbols.length / PAGE_SIZE) || 1}</span>
+        <span className="text-white">Page {page + 1} of {Math.ceil(filteredSymbols.length / PAGE_SIZE) || 1}</span>
         <button
           className="btn btn-outline-light btn-sm"
-          onClick={() => setPage((p) => Math.min(Math.ceil(selectedSymbols.length / PAGE_SIZE) - 1, p + 1))}
-          disabled={page >= Math.ceil(selectedSymbols.length / PAGE_SIZE) - 1}
+          onClick={() => setPage((p) => Math.min(Math.ceil(filteredSymbols.length / PAGE_SIZE) - 1, p + 1))}
+          disabled={page >= Math.ceil(filteredSymbols.length / PAGE_SIZE) - 1}
         >Next</button>
       </div>
 
@@ -356,23 +341,29 @@ const App = () => {
                 </tr>
               </thead>
               <tbody>
-                {pagedSymbols.map((symbol) => {
-                  return (
-                    <tr key={symbol}>
-                      <td className="px-4">{symbol}</td>
-                      <td className="px-4">{prices[symbol] || "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.open?.toFixed(2) || "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.high?.toFixed(2) || "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.low?.toFixed(2) || "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.close?.toFixed(2) || "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.volume?.toFixed(2) || "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.rsi ? indicators[symbol].rsi.toFixed(2) : "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.macd ? indicators[symbol].macd.toFixed(2) : "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.macdSignal ? indicators[symbol].macdSignal.toFixed(2) : "-"}</td>
-                      <td className="px-4">{indicators[symbol]?.macdHist ? indicators[symbol].macdHist.toFixed(2) : "-"}</td>
-                    </tr>
-                  );
-                })}
+                {pagedSymbols.length === 0 ? (
+                  <tr>
+                    <td colSpan={11} className="text-center">No coins found.</td>
+                  </tr>
+                ) : (
+                  pagedSymbols.map((symbol) => {
+                    return (
+                      <tr key={symbol}>
+                        <td className="px-4">{symbol}</td>
+                        <td className="px-4">{prices[symbol] || "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.open?.toFixed(2) || "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.high?.toFixed(2) || "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.low?.toFixed(2) || "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.close?.toFixed(2) || "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.volume?.toFixed(2) || "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.rsi ? indicators[symbol].rsi.toFixed(2) : "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.macd ? indicators[symbol].macd.toFixed(2) : "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.macdSignal ? indicators[symbol].macdSignal.toFixed(2) : "-"}</td>
+                        <td className="px-4">{indicators[symbol]?.macdHist ? indicators[symbol].macdHist.toFixed(2) : "-"}</td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
