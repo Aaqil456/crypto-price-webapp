@@ -5,7 +5,7 @@ import { useEffect, useState, useRef } from "react";
 const intervalOptions = ["Min1", "Min5", "Min15", "Min30", "Hour1", "Hour4","Hour8","Day1","Week1","Month1"];
 
 // Use a public CORS proxy in production
-const API_BASE = import.meta.env.DEV ? '/api_mexc' : 'https://corsproxy.io/?https://api.mexc.com';
+const API_BASE = import.meta.env.DEV ? '/api_mexc' : 'https://corsproxy.io/?https://api.mexc.in';
 
 const App = () => {
   const [prices, setPrices] = useState({});
@@ -50,7 +50,7 @@ const App = () => {
       } catch (err) {}
     };
     fetchSymbols();
-    intervalId = setInterval(fetchSymbols, 1000);
+    intervalId = setInterval(fetchSymbols, 5000);
     return () => clearInterval(intervalId);
   }, [firstLoad]);
 
